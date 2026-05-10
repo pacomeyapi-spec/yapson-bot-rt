@@ -167,9 +167,13 @@ async function payout(u, item, network) {
     body   : JSON.stringify(body),
   });
   const respBody = await res.json().catch(()=>({}));
-  ulog(u, 'info', `  🔍 Réponse [${res.status}]: ${JSON.stringify(respBody).substring(0,150)}`);
+  ulog(u, 'info', `  🔍 Réponse [${res.status}]: ${JSON.stringify(respBody).substring(0,200)}`);
   if (res.status === 200 || res.status === 201) {
-    const txId = respBody.id || respBody.uid || respBody.reference || null;
+    // ConnectPro retourne: {"success":true,"data":{"uid":"xxx","type":"deposit",...}}
+    // ou directement: {"uid":"xxx",...}
+    const d = respBody.data || respBody;
+    const txId = d.uid || d.id || d.reference || respBody.uid || respBody.id || null;
+    ulog(u, 'info', `  🆔 txId extrait: ${txId}`);
     return { ok:true, txId, phone:item.phone, montant:item.montant };
   }
   // Gestion erreur token expiré
@@ -198,29 +202,32 @@ async function waitForSuccess(u, txId, phone, maxWait=120000) {
     try {
       let tx = null;
       if (txId) {
-        // Vérification directe par ID
+        // Vérification directe par uid
         const res = await fetch(`https://connect.yapson.net/api/payments/user/transactions/${txId}/`, {
           headers: cpH(u),
         });
         if (res.status === 401) { ulog(u, 'err', '  ⚠ Token ConnectPro expiré'); break; }
-        tx = await res.json().catch(()=>null);
+        const raw = await res.json().catch(()=>null);
+        // ConnectPro peut wrapper dans .data
+        tx = (raw && raw.data) ? raw.data : raw;
       } else {
         // Fallback: chercher dans la liste récente par téléphone
         const res = await fetch('https://connect.yapson.net/api/payments/user/transactions/?limit=50', {
           headers: cpH(u),
         });
-        const data = await res.json().catch(()=>({}));
-        const results = data.results || data.data || [];
-        tx = results.find(t => normalizePhone(t.recipient_phone||t.phone||'') === phoneNorm
-          && (t.status === 'pending' || t.status === 'success' || t.status === 'processing'));
+        const raw = await res.json().catch(()=>({}));
+        // Peut être {data: [...]} ou {results: [...]} ou [...]
+        const list = raw.data || raw.results || (Array.isArray(raw) ? raw : []);
+        tx = list.find(t => normalizePhone(t.recipient_phone||t.phone||'') === phoneNorm);
       }
       if (!tx) { ulog(u, 'info', `  ⏳ Transaction introuvable pour ${phone}...`); continue; }
 
-      const status = (tx.status||'').toLowerCase();
-      if (status === 'success' || status === 'successful' || status === 'completed') {
+      const status = (tx.status||'').toLowerCase().trim();
+      // ConnectPro: on attend UNIQUEMENT "Succès"
+      if (status === 'succès' || status === 'succes') {
         return { ok:true, tx };
       }
-      if (status === 'failed' || status === 'rejected' || status === 'cancelled') {
+      if (['failed','rejected','cancelled','échoué','echoue','annulé','annule'].includes(status)) {
         return { ok:false, err:`Transaction ${status}: ${tx.message||tx.error_message||''}`, skip:true };
       }
       ulog(u, 'info', `  ⏳ ${(String(txId||phone)).substring(0,10)} status=${status}... (${Math.round((Date.now()-start)/1000)}s)`);
