@@ -238,10 +238,12 @@ async function waitForSuccess(u, txId, phone, maxWait=120000) {
 // ── Générer capture PNG de la transaction ─────────────────────
 async function generateTxScreenshot(tx) {
   const dt     = (tx.completed_at||tx.updated_at||tx.created_at||new Date().toISOString()).replace('T',' ').substring(0,19);
-  const ref    = tx.reference||tx.id||tx.uid||'N/A';
+  const ref    = tx.reference||tx.uid||'N/A';
   const phone  = tx.recipient_phone||tx.phone||'';
   const amount = parseInt(tx.amount||0).toLocaleString('fr-FR');
-  const network= (tx.network_name||tx.network||'').toUpperCase();
+  // network est un objet {uid, nom, code, ...} ou une string
+  const networkRaw = tx.network_name || (tx.network && typeof tx.network === 'object' ? tx.network.nom : tx.network) || '';
+  const network = String(networkRaw).toUpperCase();
   const dateMatch = dt.match(/(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})/);
   const dateFmt   = dateMatch ? `le ${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]} ${dateMatch[4]}` : dt;
   const idTx      = String(ref).replace(/[^0-9A-Z]/gi,'').slice(-10).toUpperCase();
