@@ -202,33 +202,30 @@ async function waitForSuccess(u, txId, phone, maxWait=120000) {
     try {
       let tx = null;
       if (txId) {
-        // Vérification directe par uid
+        // GET direct par uid — retourne l'objet sans wrapper
         const res = await fetch(`https://connect.yapson.net/api/payments/user/transactions/${txId}/`, {
           headers: cpH(u),
         });
         if (res.status === 401) { ulog(u, 'err', '  ⚠ Token ConnectPro expiré'); break; }
-        const raw = await res.json().catch(()=>null);
-        // ConnectPro peut wrapper dans .data
-        tx = (raw && raw.data) ? raw.data : raw;
+        tx = await res.json().catch(()=>null);
       } else {
-        // Fallback: chercher dans la liste récente par téléphone
+        // Fallback: liste récente, chercher par téléphone
         const res = await fetch('https://connect.yapson.net/api/payments/user/transactions/?limit=50', {
           headers: cpH(u),
         });
         const raw = await res.json().catch(()=>({}));
-        // Peut être {data: [...]} ou {results: [...]} ou [...]
-        const list = raw.data || raw.results || (Array.isArray(raw) ? raw : []);
-        tx = list.find(t => normalizePhone(t.recipient_phone||t.phone||'') === phoneNorm);
+        const list = Array.isArray(raw) ? raw : (raw.data || raw.results || []);
+        tx = list.find(t => normalizePhone(t.recipient_phone||'') === phoneNorm);
       }
       if (!tx) { ulog(u, 'info', `  ⏳ Transaction introuvable pour ${phone}...`); continue; }
 
       const status = (tx.status||'').toLowerCase().trim();
-      // ConnectPro: on attend UNIQUEMENT "Succès"
-      if (status === 'succès' || status === 'succes') {
+      // API ConnectPro retourne status="success" en anglais
+      if (status === 'success') {
         return { ok:true, tx };
       }
-      if (['failed','rejected','cancelled','échoué','echoue','annulé','annule'].includes(status)) {
-        return { ok:false, err:`Transaction ${status}: ${tx.message||tx.error_message||''}`, skip:true };
+      if (status === 'failed' || status === 'rejected' || status === 'cancelled') {
+        return { ok:false, err:`Transaction ${status}: ${tx.error_message||''}`, skip:true };
       }
       ulog(u, 'info', `  ⏳ ${(String(txId||phone)).substring(0,10)} status=${status}... (${Math.round((Date.now()-start)/1000)}s)`);
     } catch(e) {
