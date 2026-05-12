@@ -24,16 +24,27 @@ let   ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
 const TG_TOKEN   = process.env.TG_TOKEN   || '8483953517:AAFoya2Q_vLreZl9YvONpkKNyixMkclXI8Q';
 const TG_CHAT_ID = process.env.TG_CHAT_ID || '1382577194';
 let _tgLastMsg = ''; let _tgLastTime = 0;
-async function sendTelegram(msg) {
+function sendTelegram(msg) {
   const now = Date.now();
   if (msg === _tgLastMsg && now - _tgLastTime < 60000) return;
   _tgLastMsg = msg; _tgLastTime = now;
-  try {
-    await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:TG_CHAT_ID, text:msg, parse_mode:'HTML'}),
-    });
-  } catch(e) { console.error('Telegram alert failed:', e.message); }
+  // Utiliser https natif Node.js pour éviter tout problème avec node-fetch
+  const https = require('https');
+  const body = JSON.stringify({chat_id: TG_CHAT_ID, text: msg, parse_mode: 'HTML'});
+  const opts = {
+    hostname: 'api.telegram.org',
+    path: '/bot' + TG_TOKEN + '/sendMessage',
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body)},
+  };
+  const req = https.request(opts, (res) => {
+    let data = '';
+    res.on('data', d => data += d);
+    res.on('end', () => console.log('[TG] Alerte envoyée:', res.statusCode, data.substring(0,80)));
+  });
+  req.on('error', (e) => console.error('[TG] Erreur envoi:', e.message));
+  req.write(body);
+  req.end();
 }
 
 // ── Sessions ──────────────────────────────────────────────────
@@ -84,7 +95,7 @@ function ulog(u, type, msg) {
   // Alerte Telegram sur erreurs critiques
   if (type === 'err') {
     sendTelegram('\u26a0 Bot-RT [' + u.username + '] ERREUR\n' + msg.substring(0,300));
-  } else if (type === 'warn' && (msg.includes('expir') || msg.includes('Timeout') || msg.includes('chou') || msg.includes('manquant'))) {
+  } else if (type === 'warn') {
     sendTelegram('\u26a0 Bot-RT [' + u.username + '] AVERTISSEMENT\n' + msg.substring(0,300));
   }
 }
@@ -415,7 +426,7 @@ async function runCycle(u) {
         // 2. Attendre SUCCESS (polling ConnectPro)
         if (filesRequired) {
           ulog(u,'info',`  ⏳ Attente confirmation ConnectPro pour ${item.phone} (max 2min)...`);
-          const waitResult = await waitForSuccess(u, payResult.txId, item.phone, 120000);
+          const waitResult = await waitForSuccess(u, payResult.txId, item.phone, 600000);
 
           if (!waitResult.ok) {
             u.stats.missing++;
@@ -438,7 +449,7 @@ async function runCycle(u) {
         } else {
           // Pas de fichier — vérification quand même (timeout 2min)
           ulog(u,'info',`  ⏳ Vérification transaction ${item.phone} (max 2min)...`);
-          const waitResult = await waitForSuccess(u, payResult.txId, item.phone, 120000);
+          const waitResult = await waitForSuccess(u, payResult.txId, item.phone, 600000);
 
           if (!waitResult.ok) {
             u.stats.missing++;
