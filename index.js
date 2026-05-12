@@ -20,6 +20,21 @@ app.use(express.urlencoded({ extended: true }));
 const PORT       = parseInt(process.env.PORT || '8080', 10);
 let   ADMIN_USER = process.env.ADMIN_USER || 'admin';
 let   ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
+// ── Telegram Alertes ─────────────────────────────────────────
+const TG_TOKEN   = process.env.TG_TOKEN   || '8483953517:AAFoya2Q_vLreZl9YvONpkKNyixMkclXI8Q';
+const TG_CHAT_ID = process.env.TG_CHAT_ID || '1382577194';
+let _tgLastMsg = ''; let _tgLastTime = 0;
+async function sendTelegram(msg) {
+  const now = Date.now();
+  if (msg === _tgLastMsg && now - _tgLastTime < 60000) return;
+  _tgLastMsg = msg; _tgLastTime = now;
+  try {
+    await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({chat_id:TG_CHAT_ID, text:msg, parse_mode:'HTML'}),
+    });
+  } catch(e) { console.error('Telegram alert failed:', e.message); }
+}
 
 // ── Sessions ──────────────────────────────────────────────────
 const sessions = {};
@@ -65,7 +80,13 @@ function ulog(u, type, msg) {
   const ts = new Date().toISOString().replace('T',' ').substring(0,19);
   u.logs.unshift({ ts, type, msg });
   if (u.logs.length > 500) u.logs.pop();
-  console.log(`[${u.username}][${type.toUpperCase()}] ${ts} — ${msg}`);
+  console.log('['+u.username+']['+type.toUpperCase()+'] '+ts+' — '+msg);
+  // Alerte Telegram sur erreurs critiques
+  if (type === 'err') {
+    sendTelegram('\u26a0 Bot-RT [' + u.username + '] ERREUR\n' + msg.substring(0,300));
+  } else if (type === 'warn' && (msg.includes('expir') || msg.includes('Timeout') || msg.includes('chou') || msg.includes('manquant'))) {
+    sendTelegram('\u26a0 Bot-RT [' + u.username + '] AVERTISSEMENT\n' + msg.substring(0,300));
+  }
 }
 
 // ── Mapping réseau (UUIDs ConnectPro) ────────────────────────
