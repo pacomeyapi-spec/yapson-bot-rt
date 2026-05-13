@@ -434,7 +434,8 @@ async function runCycle(u) {
           if (!waitResult.ok) {
             u.stats.missing++;
             if (waitResult.skip) {
-              ulog(u,'warn',`  ⚠ ${waitResult.err} — numéro ignoré`);
+              u.blacklist.add(item.phone);
+              ulog(u,'warn',`  ⛔ ${item.phone} ajouté à la blacklist — ${waitResult.err}`);
             } else {
               ulog(u,'warn',`  ⚠ ${item.phone} — ${waitResult.err}`);
             }
@@ -456,7 +457,8 @@ async function runCycle(u) {
 
           if (!waitResult.ok) {
             u.stats.missing++;
-            ulog(u,'warn',`  ⚠ ${waitResult.err} — numéro ignoré`);
+            u.blacklist.add(item.phone);
+            ulog(u,'warn',`  ⛔ ${item.phone} ajouté à la blacklist — ${waitResult.err}`);
             await sleep(800);
             continue;
           }
@@ -729,7 +731,7 @@ app.post('/user/save-config', (req,res) => {
 app.get('/user/start', (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u) startPolling(u); res.redirect('/dashboard'); });
 app.get('/user/stop',  (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u) stopPolling(u);  res.redirect('/dashboard'); });
 app.get('/user/run',   (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u) runCycle(u).catch(e=>ulog(u,'err',e.message)); res.redirect('/dashboard'); });
-app.get('/user/reset', (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u){Object.keys(u.stats).forEach(k=>u.stats[k]=0);u.logs.length=0;ulog(u,'info','Reset');} res.redirect('/dashboard'); });
+app.get('/user/reset', (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u){Object.keys(u.stats).forEach(k=>u.stats[k]=0);u.logs.length=0;u.blacklist.clear();ulog(u,'info','Reset + blacklist vidée');} res.redirect('/dashboard'); });
 
 // Routes admin
 app.get('/admin', (req,res) => { const s=getSession(req); if(!s||!s.isAdmin) return res.redirect('/login'); res.send(adminPage()); });
