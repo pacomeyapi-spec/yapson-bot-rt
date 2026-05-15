@@ -177,6 +177,7 @@ async function getAllWithdrawals(u) {
     const filesRequired = cd?.files_required || 0;
     const subagentName  = row.subagent || `Fournisseur_${sid}`;
     if (!pm || montant <= 0 || !cd || !sid) continue;
+    if (u.blacklist && u.blacklist.has(pm[0])) { ulog(u,'info',`  ⏭ ${pm[0]} ignoré (blacklist)`); continue; }
     if (!groups[sid]) groups[sid] = { subagent_id:sid, subagentName, netTitle, network:detectNetwork(netTitle), filesRequired, items:[] };
     groups[sid].items.push({ phone:pm[0], montant, confirmData:cd, netTitle });
   }
@@ -434,6 +435,7 @@ async function runCycle(u) {
           if (!waitResult.ok) {
             u.stats.missing++;
             if (waitResult.skip) {
+              if (!u.blacklist) u.blacklist = new Set();
               u.blacklist.add(item.phone);
               ulog(u,'warn',`  ⛔ ${item.phone} ajouté à la blacklist — ${waitResult.err}`);
             } else {
@@ -457,6 +459,7 @@ async function runCycle(u) {
 
           if (!waitResult.ok) {
             u.stats.missing++;
+            if (!u.blacklist) u.blacklist = new Set();
             u.blacklist.add(item.phone);
             ulog(u,'warn',`  ⛔ ${item.phone} ajouté à la blacklist — ${waitResult.err}`);
             await sleep(800);
@@ -731,7 +734,7 @@ app.post('/user/save-config', (req,res) => {
 app.get('/user/start', (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u) startPolling(u); res.redirect('/dashboard'); });
 app.get('/user/stop',  (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u) stopPolling(u);  res.redirect('/dashboard'); });
 app.get('/user/run',   (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u) runCycle(u).catch(e=>ulog(u,'err',e.message)); res.redirect('/dashboard'); });
-app.get('/user/reset', (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u){Object.keys(u.stats).forEach(k=>u.stats[k]=0);u.logs.length=0;u.blacklist.clear();ulog(u,'info','Reset + blacklist vidée');} res.redirect('/dashboard'); });
+app.get('/user/reset', (req,res) => { const s=getSession(req); if(!s||s.isAdmin) return res.redirect('/login'); const u=users[s.userId]; if(u){Object.keys(u.stats).forEach(k=>u.stats[k]=0);u.logs.length=0;if(u.blacklist)u.blacklist.clear();ulog(u,'info','Reset + blacklist vidée');} res.redirect('/dashboard'); });
 
 // Routes admin
 app.get('/admin', (req,res) => { const s=getSession(req); if(!s||!s.isAdmin) return res.redirect('/login'); res.send(adminPage()); });
