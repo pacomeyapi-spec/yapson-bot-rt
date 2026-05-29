@@ -11,10 +11,28 @@ const fetch = require('node-fetch');
 const FormData = require('form-data');
 const crypto = require('crypto');
 const { chromium } = require('playwright');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ── Firebase Firestore (persistance des comptes agents) ───────
+let db = null;
+try {
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+if (serviceAccount && serviceAccount.project_id) {
+initializeApp({ credential: cert(serviceAccount) });
+db = getFirestore();
+console.log('✅ Firebase Firestore connecté — comptes persistés');
+} else {
+console.error('⚠ FIREBASE_SERVICE_ACCOUNT manquant — persistance DÉSACTIVÉE (comptes en mémoire, perdus au redéploiement)');
+}
+} catch(e) {
+console.error('❌ Firebase init échoué:', e.message, '— persistance désactivée');
+db = null;
+}
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const MGMT_URL = (process.env.MGMT_URL || 'https://my-managment.com').replace(/\/$/, '');
@@ -58,11 +76,9 @@ function requireAdmin(req, res, next) { const s=getSession(req); if(!s||!s.isAdm
 const users = {};
 function hashPass(p) { return crypto.createHash('sha256').update(p).digest('hex'); }
 
-function createUser(username, password) {
-const id = crypto.randomBytes(8).toString('hex');
-users[id] = {
-id, username,
-passwordHash: hashPass(password),
+function buildUser(id, username, passwordHash) {
+return {
+id, username, passwordHash,
 cfg: {
 mgmtCookies    : '',
 connectproToken: '',
@@ -76,7 +92,63 @@ pollTimer: null, isRunning: false, botActive: false,
 // Navigateur intégré
 loginBrowser: null, loginPage: null, loginScreenshot: null,
 };
-return users[id];
+}
+
+function createUser(username, password) {
+const id = crypto.randomBytes(8).toString('hex');
+const u = buildUser(id, username, hashPass(password));
+users[id] = u;
+saveUser(u);
+return u;
+}
+
+// ── Persistance Firebase ──────────────────────────────────────
+async function saveUser(u) {
+if (!db || !u) return;
+try {
+await db.collection('botrt_users').doc(u.id).set({
+id: u.id, username: u.username, passwordHash: u.passwordHash,
+cfg: u.cfg, botActive: !!u.botActive,
+updatedAt: FieldValue.serverTimestamp(),
+}, { merge: true });
+} catch(e) { console.error(`[Firebase] saveUser: ${e.message}`); }
+}
+
+async function deleteUserFromDB(userId) {
+if (!db) return;
+try { await db.collection('botrt_users').doc(userId).delete(); }
+catch(e) { console.error(`[Firebase] deleteUser: ${e.message}`); }
+}
+
+async function loadUsersFromDB() {
+if (!db) return;
+try {
+const snap = await db.collection('botrt_users').get();
+let count = 0;
+for (const doc of snap.docs) {
+const d = doc.data();
+const u = buildUser(d.id, d.username, d.passwordHash);
+if (d.cfg) u.cfg = { ...u.cfg, ...d.cfg };
+users[u.id] = u;
+count++;
+if (d.botActive) { try { startPolling(u); } catch(e){ console.error('resume:', e.message); } }
+}
+console.log(`✅ ${count} compte(s) agent chargé(s) depuis Firebase`);
+} catch(e) { console.error(`[Firebase] loadUsers: ${e.message}`); }
+}
+
+async function saveAdminPass(newPass) {
+if (!db) return;
+try { await db.collection('botrt_config').doc('admin').set({ password: newPass }, { merge: true }); }
+catch(e) { console.error(`[Firebase] saveAdminPass: ${e.message}`); }
+}
+
+async function loadAdminPass() {
+if (!db) return;
+try {
+const doc = await db.collection('botrt_config').doc('admin').get();
+if (doc.exists && doc.data().password) { ADMIN_PASS = doc.data().password; console.log('✅ Mot de passe admin chargé depuis Firebase'); }
+} catch(e) { console.error(`[Firebase] loadAdminPass: ${e.message}`); }
 }
 
 function ulog(u, type, msg) {
@@ -439,6 +511,7 @@ const mgmtCookies=cookies.filter(c=>c.domain.includes('my-managment')||c.domain.
 if(mgmtCookies.length===0) return res.json({error:'Aucun cookie my-managment trouvé'});
 const cookieStr=JSON.stringify(mgmtCookies);
 u.cfg.mgmtCookies=cookieStr;
+saveUser(u);
 ulog(u,'ok',`🍪 ${mgmtCookies.length} cookie(s) capturés depuis navigateur intégré`);
 res.json({ok:true,count:mgmtCookies.length});
 }catch(e){res.json({error:e.message});}
@@ -680,6 +753,7 @@ const{connectproToken,mgmtCookies}=req.body;
 if(connectproToken&&!connectproToken.startsWith('●')){u.cfg.connectproToken=connectproToken.trim();ulog(u,'ok','🔑 Token ConnectPro mis à jour');}
 if(mgmtCookies){const t=mgmtCookies.trim();const ok=t.startsWith('[')||/^[a-zA-Z_][a-zA-Z0-9_]*=/.test(t);const bad=t.includes('configuré')||t.includes('(coller')||t.startsWith('(');if(ok&&!bad){u.cfg.mgmtCookies=t;ulog(u,'ok',`🍪 Cookies mis à jour — ${parseCookies(t).split(';').length} cookie(s)`);}else if(bad){ulog(u,'warn','⚠ Cookies ignorés (placeholder)');}}
 ulog(u,'ok','Comptes sauvegardés');
+saveUser(u);
 if(u.botActive){stopPolling(u);setTimeout(()=>startPolling(u),500);}
 res.redirect('/dashboard');
 });
@@ -689,11 +763,12 @@ const u=users[s.userId];if(!u)return res.redirect('/login');
 if(req.body.pollInterval)u.cfg.pollInterval=Math.max(60,parseInt(req.body.pollInterval));
 if(req.body.maxSolde!==undefined)u.cfg.maxSolde=parseInt(req.body.maxSolde)||0;
 ulog(u,'ok',`Config: intervalle=${u.cfg.pollInterval}s`);
+saveUser(u);
 if(u.botActive){stopPolling(u);setTimeout(()=>startPolling(u),500);}
 res.redirect('/dashboard');
 });
-app.get('/user/start',(req,res)=>{const s=getSession(req);if(!s||s.isAdmin)return res.redirect('/login');const u=users[s.userId];if(u)startPolling(u);res.redirect('/dashboard');});
-app.get('/user/stop',(req,res)=>{const s=getSession(req);if(!s||s.isAdmin)return res.redirect('/login');const u=users[s.userId];if(u)stopPolling(u);res.redirect('/dashboard');});
+app.get('/user/start',(req,res)=>{const s=getSession(req);if(!s||s.isAdmin)return res.redirect('/login');const u=users[s.userId];if(u){startPolling(u);saveUser(u);}res.redirect('/dashboard');});
+app.get('/user/stop',(req,res)=>{const s=getSession(req);if(!s||s.isAdmin)return res.redirect('/login');const u=users[s.userId];if(u){stopPolling(u);saveUser(u);}res.redirect('/dashboard');});
 app.get('/user/run',(req,res)=>{const s=getSession(req);if(!s||s.isAdmin)return res.redirect('/login');const u=users[s.userId];if(u)runCycle(u).catch(e=>ulog(u,'err',e.message));res.redirect('/dashboard');});
 app.get('/user/reset',(req,res)=>{const s=getSession(req);if(!s||s.isAdmin)return res.redirect('/login');const u=users[s.userId];if(u){Object.keys(u.stats).forEach(k=>u.stats[k]=0);u.logs.length=0;if(u.blacklist)u.blacklist.clear();ulog(u,'info','Reset + blacklist vidée');}res.redirect('/dashboard');});
 app.get('/admin',(req,res)=>{const s=getSession(req);if(!s||!s.isAdmin)return res.redirect('/login');res.send(adminPage());});
@@ -708,7 +783,7 @@ res.send(adminPage('',`Utilisateur "${username}" créé ✔`));
 app.post('/admin/delete-user',(req,res)=>{
 const s=getSession(req);if(!s||!s.isAdmin)return res.redirect('/login');
 const u=users[req.body.userId];if(!u)return res.send(adminPage('Introuvable'));
-const name=u.username;stopPolling(u);if(u.loginBrowser)u.loginBrowser.close().catch(()=>{});delete users[req.body.userId];
+const name=u.username;stopPolling(u);if(u.loginBrowser)u.loginBrowser.close().catch(()=>{});delete users[req.body.userId];deleteUserFromDB(req.body.userId);
 res.send(adminPage('',`"${name}" supprimé ✔`));
 });
 app.post('/admin/change-password',(req,res)=>{
@@ -717,6 +792,7 @@ const{oldPass,newPass}=req.body;
 if(oldPass!==ADMIN_PASS)return res.send(adminPage('Ancien mot de passe incorrect'));
 if(!newPass||newPass.length<4)return res.send(adminPage('Mot de passe trop court (min 4 caractères)'));
 ADMIN_PASS=newPass;
+saveAdminPass(newPass);
 res.send(adminPage('','Mot de passe admin changé ✔'));
 });
 app.get('/health',(req,res)=>{
@@ -725,4 +801,8 @@ if(s.isAdmin)return res.json({users:Object.values(users).map(u=>({username:u.use
 const u=users[s.userId];return u?res.json({...u.stats,botActive:u.botActive}):res.status(404).json({error:'Introuvable'});
 });
 
-app.listen(PORT,()=>{console.log(`YapsonBot-RT (ConnectPro) — port ${PORT} | Admin: ${ADMIN_USER}`);});
+app.listen(PORT, async ()=>{
+console.log(`YapsonBot-RT (ConnectPro) — port ${PORT} | Admin: ${ADMIN_USER}`);
+await loadAdminPass();
+await loadUsersFromDB();
+});
