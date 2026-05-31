@@ -82,6 +82,7 @@ id, username, passwordHash,
 cfg: {
 mgmtCookies    : '',
 connectproToken: '',
+yaplessToken   : '',
 reportId       : process.env.REPORT_ID || '8231c3be3216307da83c067d263c09ec',
 pollInterval   : parseInt(process.env.POLL_INTERVAL || '900'),
 maxSolde       : parseInt(process.env.MAX_SOLDE || '0'),
@@ -168,6 +169,10 @@ const NET_UUIDS = {
 'Orangeint': '6fbc14c6-2b0b-431a-afce-2c371b33b2a3',
 'Wave'    : '97847ae3-6c50-4116-a6da-a69695afbaaa',
 };
+// ── Aiguillage YAPLESS (USSD téléphone) ──────────────────────
+// Réseaux décaissés via YAPLESS (DÉPÔT USSD). Wave reste sur ConnectPro (absent ici).
+const YAPLESS_URL = (process.env.YAPLESS_URL || 'https://yapless-ussd-production.up.railway.app').replace(/\/$/,'');
+const NET_TO_OPERATOR = { 'Orangeint':'ORANGE', 'ORANGE CI':'ORANGE', 'MTN CI':'MTN', 'MOOV CI':'MOOV' };
 function detectNetwork(title) {
 const t = (title||'').toLowerCase();
 if (t.includes('wave')) return 'Wave';
@@ -378,13 +383,70 @@ return{ok:false,err:`HTTP ${res.status} — ${et.substring(0,80)}`};
 }
 
 // ── Cycle principal ───────────────────────────────────────────
+// ── YAPLESS : décaissement USSD via téléphone ────────────────
+async function createYaplessPayout(u, { operator, amount, phone, ref }) {
+try {
+const res = await fetch(`${YAPLESS_URL}/api/ext/payout`, {
+method:'POST',
+headers:{ 'Content-Type':'application/json', 'x-agent-token':u.cfg.yaplessToken },
+body: JSON.stringify({ operator, amount, phoneNumber:phone, clientRef:ref }),
+});
+const j = await res.json().catch(()=>({}));
+if (res.ok && j.ok) return { ok:true, id:j.id, reference:j.reference, status:j.status };
+return { ok:false, err:`[${res.status}] ${j.error||''}` };
+} catch(e) { return { ok:false, err:e.message }; }
+}
+async function pollYapless(u, id, maxWait=130000) {
+const start = Date.now();
+while (Date.now()-start < maxWait) {
+await sleep(5000);
+try {
+const res = await fetch(`${YAPLESS_URL}/api/ext/payout/${id}`, { headers:{ 'x-agent-token':u.cfg.yaplessToken } });
+const j = await res.json().catch(()=>({}));
+if (!res.ok) { ulog(u,'info',` ⏳ YAPLESS HTTP ${res.status}...`); continue; }
+const st = String(j.status||'').toUpperCase();
+if (st==='SUCCESS') return { ok:true, status:st, smsText:j.smsText, reference:j.reference };
+if (st==='FAILED') return { ok:false, status:st, err:j.error||'échec' };
+ulog(u,'info',` ⏳ YAPLESS ${st}... (${Math.round((Date.now()-start)/1000)}s)`);
+} catch(e) { ulog(u,'info',` ⏳ YAPLESS attente... (${Math.round((Date.now()-start)/1000)}s)`); }
+}
+return { ok:false, status:'TIMEOUT', err:'Timeout 2min YAPLESS' };
+}
+// Traite un retrait via YAPLESS : crée le DÉPÔT, attend le SMS, confirme my-managment.
+async function handleYaplessItem(u, item, operator, filesRequired) {
+ulog(u,'info',` 📡 YAPLESS → ${item.phone} — ${item.montant.toLocaleString()} FCFA [${operator}]`);
+const created = await createYaplessPayout(u, { operator, amount:item.montant, phone:item.phone, ref:String(item.confirmData?.id||'') });
+if (!created.ok) { u.stats.missing++; ulog(u,'err',` ✘ YAPLESS création échouée: ${item.phone} — ${created.err}`); return; }
+ulog(u,'ok',` ✔ Ordre YAPLESS créé: ${item.phone} (ref ${created.reference})`);
+const w = await pollYapless(u, created.id, 130000);
+if (!w.ok) {
+u.stats.missing++;
+if (!u.blacklist) u.blacklist = new Set();
+u.blacklist.add(item.phone);
+ulog(u,'warn',` ⛔ ${item.phone} blacklisté — YAPLESS ${w.status||''} ${w.err||''}`);
+return;
+}
+ulog(u,'ok',` ✔ YAPLESS SUCCESS: ${item.phone} (SMS reçu)`);
+if (filesRequired) {
+const tx = { reference:created.reference, recipient_phone:item.phone, amount:item.montant, network_name:operator, completed_at:new Date().toISOString(), status:'success' };
+const screenshot = await generateTxScreenshot(tx);
+const cr = await confirmWithFile(u, item, screenshot.buffer, screenshot.mimeType, screenshot.filename);
+if (cr.ok) { u.stats.confirmed++; ulog(u,'ok',` ✔ Confirmé avec fichier: ${item.phone}`); }
+else { u.stats.missing++; ulog(u,'warn',` ⚠ Confirmation échouée: ${item.phone} — ${cr.err}`); }
+} else {
+const cr = await confirmWithoutFile(u, item);
+if (cr.ok) { u.stats.confirmed++; ulog(u,'ok',` ✔ Confirmé: ${item.phone}`); }
+else { u.stats.missing++; ulog(u,'warn',` ⚠ Manuel: ${item.phone} — ${cr.err}`); }
+}
+}
+
 async function runCycle(u) {
 if (u.isRunning) return;
 u.isRunning=true; u.stats.polls++;
 ulog(u,'info',`━━ Poll #${u.stats.polls} ━━`);
 try {
 if (!parseCookies(u.cfg.mgmtCookies)) throw new Error('Cookies my-managment manquants');
-if (!u.cfg.connectproToken) throw new Error('Token ConnectPro manquant');
+if (!u.cfg.connectproToken && !u.cfg.yaplessToken) throw new Error('Aucun canal de décaissement : configurez le token ConnectPro et/ou le jeton YAPLESS');
 const groups = await getAllWithdrawals(u);
 const groupList = Object.values(groups);
 if (!groupList.length) { ulog(u,'info','Poll: 0 retrait en attente'); u.isRunning=false; return; }
@@ -394,6 +456,8 @@ const{subagentName,network,filesRequired,items}=group;
 ulog(u,'info',`▶ ${subagentName} | ${network} | ${items.length} retrait(s) | Fichier: ${filesRequired?'OUI':'NON'}`);
 for (const item of items) {
 ulog(u,'info',` → ${item.phone} — ${item.montant.toLocaleString()} FCFA [${network}]`);
+const yOp = NET_TO_OPERATOR[network];
+if (u.cfg.yaplessToken && yOp) { await handleYaplessItem(u, item, yOp, filesRequired); await sleep(700); continue; }
 const payResult=await payout(u,item,network);
 if (!payResult.ok) { u.stats.missing++; ulog(u,'err',` ✘ Décaissement échoué: ${item.phone} — ${payResult.err}`); if(payResult.tokenExpired){ulog(u,'err',' 🔑 Token ConnectPro expiré — arrêt');u.isRunning=false;return;} await sleep(800); continue; }
 ulog(u,'ok',` ✔ Décaissé: ${item.phone} → ${item.montant.toLocaleString()} FCFA (id: ${String(payResult.txId||'?').substring(0,10)})`);
@@ -695,6 +759,10 @@ ${hasNav?`<form method="POST" action="/user/browser/close" style="display:inline
 <div class="frow"><label>Token ConnectPro (accessToken)</label>
 <input type="password" name="connectproToken" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" value="${u.cfg.connectproToken?'●'.repeat(20):''}" placeholder="eyJhbGci...">
 ${u.cfg.connectproToken?'<span class="tag-ok">✓ OK</span>':'<span class="tag-err">✗ manquant</span>'}
+</div>
+<div class="frow"><label>Jeton agent YAPLESS (Orange/MTN/Moov → USSD ; Wave reste ConnectPro)</label>
+<input type="password" name="yaplessToken" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" value="${u.cfg.yaplessToken?'●'.repeat(20):''}" placeholder="yat_...">
+${u.cfg.yaplessToken?'<span class="tag-ok">✓ Actif</span>':'<span class="tag-err">✗ ConnectPro pour tout</span>'}
 </div></div>
 <div>
 <div class="seclbl" style="color:var(--g)">my-managment.com</div>
@@ -763,8 +831,9 @@ app.get('/dashboard',(req,res)=>{const s=getSession(req);if(!s)return res.redire
 app.post('/user/save-accounts',(req,res)=>{
 const s=getSession(req);if(!s||s.isAdmin)return res.redirect('/login');
 const u=users[s.userId];if(!u)return res.redirect('/login');
-const{connectproToken,mgmtCookies}=req.body;
+const{connectproToken,mgmtCookies,yaplessToken}=req.body;
 if(connectproToken&&!connectproToken.startsWith('●')){u.cfg.connectproToken=connectproToken.trim();ulog(u,'ok','🔑 Token ConnectPro mis à jour');}
+if(yaplessToken&&!yaplessToken.startsWith('●')){u.cfg.yaplessToken=yaplessToken.trim();ulog(u,'ok','📡 Jeton YAPLESS mis à jour (Orange/MTN/Moov via USSD)');}
 if(mgmtCookies){const t=mgmtCookies.trim();const ok=t.startsWith('[')||/^[a-zA-Z_][a-zA-Z0-9_]*=/.test(t);const bad=t.includes('configuré')||t.includes('(coller')||t.startsWith('(');if(ok&&!bad){u.cfg.mgmtCookies=t;ulog(u,'ok',`🍪 Cookies mis à jour — ${parseCookies(t).split(';').length} cookie(s)`);}else if(bad){ulog(u,'warn','⚠ Cookies ignorés (placeholder)');}}
 ulog(u,'ok','Comptes sauvegardés');
 saveUser(u);
