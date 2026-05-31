@@ -652,7 +652,21 @@ const hasNav=u.loginBrowser&&u.loginBrowser.isConnected()&&u.loginPage&&!u.login
 const logHtml=u.logs.slice(0,120).map(e=>{const cls=e.type==='ok'?'ok':e.type==='err'?'er':e.type==='warn'?'wa':'in';const ic=e.type==='ok'?'✔':e.type==='err'?'✘':e.type==='warn'?'⚠':'▸';return `<div class="le ${cls}"><span class="lt">${e.ts}</span><span>${ic} ${e.msg}</span></div>`;}).join('');
 return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Bot-RT — ${u.username}</title>
 <style>${CSS_COMMON}</style>
-<script>if(${JSON.stringify(u.botActive)})setTimeout(()=>location.reload(),15000);</script>
+<script>
+(function(){
+  window.addEventListener('pageshow', function(){
+    try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch(e){}
+  });
+  if (${JSON.stringify(u.botActive)}) {
+    setInterval(function(){
+      var a = document.activeElement;
+      if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return;
+      if (document.hidden) return;
+      location.reload();
+    }, 15000);
+  }
+})();
+</script>
 </head><body><div class="wrap">
 <div style="display:flex;justify-content:space-between;align-items:center">
 <div style="color:var(--p);font-weight:700;font-size:1.1rem">🤖 ${u.username}</div>
@@ -679,13 +693,13 @@ ${hasNav?`<form method="POST" action="/user/browser/close" style="display:inline
 <div>
 <div class="seclbl" style="color:var(--b)">app.connectpro.yapson.net</div>
 <div class="frow"><label>Token ConnectPro (accessToken)</label>
-<input type="password" name="connectproToken" value="${u.cfg.connectproToken?'●'.repeat(20):''}" placeholder="eyJhbGci...">
+<input type="password" name="connectproToken" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" value="${u.cfg.connectproToken?'●'.repeat(20):''}" placeholder="eyJhbGci...">
 ${u.cfg.connectproToken?'<span class="tag-ok">✓ OK</span>':'<span class="tag-err">✗ manquant</span>'}
 </div></div>
 <div>
 <div class="seclbl" style="color:var(--g)">my-managment.com</div>
 <div class="frow"><label>Cookies manuels (optionnel si navigateur utilisé)</label>
-<textarea name="mgmtCookies" rows="3" placeholder='[{"name":"auid",...}] ou PHPSESSID=...'></textarea>
+<textarea name="mgmtCookies" rows="3" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder='[{"name":"auid",...}] ou PHPSESSID=...'></textarea>
 ${hasSession?'<span class="tag-ok">✓ Session active</span>':'<span class="tag-err">✗ Requis</span>'}
 </div></div></div>
 <div style="margin-top:14px"><button class="btn btn-save">💾 Sauvegarder</button></div>
