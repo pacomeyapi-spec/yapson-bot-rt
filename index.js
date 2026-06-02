@@ -83,6 +83,8 @@ cfg: {
 mgmtCookies    : '',
 connectproToken: '',
 yaplessToken   : '',
+yapsonToken    : '',
+platforms      : { WAVE: 'connectpro', ORANGE: 'yapless' },
 reportId       : process.env.REPORT_ID || '8231c3be3216307da83c067d263c09ec',
 pollInterval   : parseInt(process.env.POLL_INTERVAL || '900'),
 maxSolde       : parseInt(process.env.MAX_SOLDE || '0'),
@@ -172,6 +174,7 @@ const NET_UUIDS = {
 // ── Aiguillage YAPLESS (USSD téléphone) ──────────────────────
 // Réseaux décaissés via YAPLESS (DÉPÔT USSD). Wave reste sur ConnectPro (absent ici).
 const YAPLESS_URL = (process.env.YAPLESS_URL || 'https://yapless-ussd-production.up.railway.app').replace(/\/$/,'');
+const YAPSON_URL = (process.env.YAPSON_URL || 'https://yapson-transfer-production.up.railway.app').replace(/\/$/,'');
 const NET_TO_OPERATOR = { 'Orangeint':'ORANGE', 'ORANGE CI':'ORANGE', 'MTN CI':'MTN', 'MOOV CI':'MOOV' };
 function detectNetwork(title) {
 const t = (title||'').toLowerCase();
@@ -440,13 +443,91 @@ else { u.stats.missing++; ulog(u,'warn',` ⚠ Manuel: ${item.phone} — ${cr.err
 }
 }
 
+// ── Choix de la plateforme de décaissement par opérateur ─────
+// WAVE   : connectpro (défaut) | yapson
+// ORANGE : yapless (défaut) | yapson
+// MTN/MOOV : yapless si jeton, sinon connectpro (inchangé)
+function choosePlatform(u, operator) {
+const sel = (u.cfg.platforms && u.cfg.platforms[operator]) || '';
+if (operator === 'WAVE') {
+if (sel === 'yapson' && u.cfg.yapsonToken) return 'yapson';
+return 'connectpro';
+}
+if (operator === 'ORANGE') {
+if (sel === 'yapson' && u.cfg.yapsonToken) return 'yapson';
+if (u.cfg.yaplessToken) return 'yapless';
+return 'connectpro';
+}
+// MTN / MOOV / inconnu
+if (u.cfg.yaplessToken) return 'yapless';
+return 'connectpro';
+}
+
+// ── yapson-transfer : décaissement APP (Wave/Orange) via appareil ─
+async function createYapsonPayout(u, { operator, amount, phone, recipientName, ref }) {
+try {
+const res = await fetch(`${YAPSON_URL}/api/ext/payout`, {
+method:'POST',
+headers:{ 'Content-Type':'application/json', 'x-agent-token':u.cfg.yapsonToken },
+body: JSON.stringify({ operator, amount, phoneNumber:phone, recipientName, clientRef:ref }),
+});
+const j = await res.json().catch(()=>({}));
+if (res.ok && j.ok) return { ok:true, id:j.id, reference:j.reference, status:j.status };
+return { ok:false, err:`[${res.status}] ${j.error||''}` };
+} catch(e) { return { ok:false, err:e.message }; }
+}
+async function pollYapson(u, id, maxWait=240000) {
+const start = Date.now();
+while (Date.now()-start < maxWait) {
+await sleep(6000);
+try {
+const res = await fetch(`${YAPSON_URL}/api/ext/payout/${id}`, { headers:{ 'x-agent-token':u.cfg.yapsonToken } });
+const j = await res.json().catch(()=>({}));
+if (!res.ok) { ulog(u,'info',` ⏳ yapson HTTP ${res.status}...`); continue; }
+const st = String(j.status||'').toUpperCase();
+if (st==='SUCCESS') return { ok:true, status:st, operatorRef:j.operatorRef, reference:j.reference };
+if (st==='FAILED') return { ok:false, status:st, err:j.error||'échec' };
+ulog(u,'info',` ⏳ yapson ${st}... (${Math.round((Date.now()-start)/1000)}s)`);
+} catch(e) { ulog(u,'info',` ⏳ yapson attente... (${Math.round((Date.now()-start)/1000)}s)`); }
+}
+return { ok:false, status:'TIMEOUT', err:'Timeout yapson' };
+}
+// Traite un retrait via yapson-transfer (Wave/Orange app), puis confirme my-managment.
+async function handleYapsonItem(u, item, operator, filesRequired) {
+ulog(u,'info',` 🟢 yapson-transfer → ${item.phone} — ${item.montant.toLocaleString()} FCFA [${operator}]`);
+const recipientName = operator === 'WAVE' ? (item.recipientName || 'Client') : null;
+const created = await createYapsonPayout(u, { operator, amount:item.montant, phone:item.phone, recipientName, ref:String(item.confirmData?.id||'') });
+if (!created.ok) { u.stats.missing++; ulog(u,'err',` ✘ yapson création échouée: ${item.phone} — ${created.err}`); return; }
+ulog(u,'ok',` ✔ Ordre yapson créé: ${item.phone} (ref ${created.reference})`);
+const w = await pollYapson(u, created.id, 240000);
+if (!w.ok) {
+u.stats.missing++;
+if (!u.blacklist) u.blacklist = new Set();
+u.blacklist.add(item.phone);
+ulog(u,'warn',` ⛔ ${item.phone} blacklisté — yapson ${w.status||''} ${w.err||''}`);
+return;
+}
+ulog(u,'ok',` ✔ yapson SUCCESS: ${item.phone}${w.operatorRef?' (réf '+w.operatorRef+')':''}`);
+if (filesRequired) {
+const tx = { reference:w.operatorRef||created.reference, recipient_phone:item.phone, amount:item.montant, network_name:operator, completed_at:new Date().toISOString(), status:'success' };
+const screenshot = await generateTxScreenshot(tx);
+const cr = await confirmWithFile(u, item, screenshot.buffer, screenshot.mimeType, screenshot.filename);
+if (cr.ok) { u.stats.confirmed++; ulog(u,'ok',` ✔ Confirmé avec fichier: ${item.phone}`); }
+else { u.stats.missing++; ulog(u,'warn',` ⚠ Confirmation échouée: ${item.phone} — ${cr.err}`); }
+} else {
+const cr = await confirmWithoutFile(u, item);
+if (cr.ok) { u.stats.confirmed++; ulog(u,'ok',` ✔ Confirmé: ${item.phone}`); }
+else { u.stats.missing++; ulog(u,'warn',` ⚠ Manuel: ${item.phone} — ${cr.err}`); }
+}
+}
+
 async function runCycle(u) {
 if (u.isRunning) return;
 u.isRunning=true; u.stats.polls++;
 ulog(u,'info',`━━ Poll #${u.stats.polls} ━━`);
 try {
 if (!parseCookies(u.cfg.mgmtCookies)) throw new Error('Cookies my-managment manquants');
-if (!u.cfg.connectproToken && !u.cfg.yaplessToken) throw new Error('Aucun canal de décaissement : configurez le token ConnectPro et/ou le jeton YAPLESS');
+if (!u.cfg.connectproToken && !u.cfg.yaplessToken && !u.cfg.yapsonToken) throw new Error('Aucun canal de décaissement : configurez ConnectPro, YAPLESS et/ou yapson-transfer');
 const groups = await getAllWithdrawals(u);
 const groupList = Object.values(groups);
 if (!groupList.length) { ulog(u,'info','Poll: 0 retrait en attente'); u.isRunning=false; return; }
@@ -456,8 +537,11 @@ const{subagentName,network,filesRequired,items}=group;
 ulog(u,'info',`▶ ${subagentName} | ${network} | ${items.length} retrait(s) | Fichier: ${filesRequired?'OUI':'NON'}`);
 for (const item of items) {
 ulog(u,'info',` → ${item.phone} — ${item.montant.toLocaleString()} FCFA [${network}]`);
-const yOp = NET_TO_OPERATOR[network];
-if (u.cfg.yaplessToken && yOp) { await handleYaplessItem(u, item, yOp, filesRequired); await sleep(700); continue; }
+const operator = network === 'Wave' ? 'WAVE' : NET_TO_OPERATOR[network];
+const platform = choosePlatform(u, operator);
+if (operator) ulog(u,'info',` ⚙ ${operator} → plateforme: ${platform}`);
+if (platform === 'yapson' && operator) { await handleYapsonItem(u, item, operator, filesRequired); await sleep(700); continue; }
+if (platform === 'yapless' && operator && operator !== 'WAVE') { await handleYaplessItem(u, item, operator, filesRequired); await sleep(700); continue; }
 const payResult=await payout(u,item,network);
 if (!payResult.ok) { u.stats.missing++; ulog(u,'err',` ✘ Décaissement échoué: ${item.phone} — ${payResult.err}`); if(payResult.tokenExpired){ulog(u,'err',' 🔑 Token ConnectPro expiré — arrêt');u.isRunning=false;return;} await sleep(800); continue; }
 ulog(u,'ok',` ✔ Décaissé: ${item.phone} → ${item.montant.toLocaleString()} FCFA (id: ${String(payResult.txId||'?').substring(0,10)})`);
@@ -763,6 +847,24 @@ ${u.cfg.connectproToken?'<span class="tag-ok">✓ OK</span>':'<span class="tag-e
 <div class="frow"><label>Jeton agent YAPLESS (Orange/MTN/Moov → USSD ; Wave reste ConnectPro)</label>
 <input type="password" name="yaplessToken" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" value="${u.cfg.yaplessToken?'●'.repeat(20):''}" placeholder="yat_...">
 ${u.cfg.yaplessToken?'<span class="tag-ok">✓ Actif</span>':'<span class="tag-err">✗ ConnectPro pour tout</span>'}
+</div>
+<div class="seclbl" style="color:var(--g);margin-top:10px">yapson-transfer (Wave / Orange via appareil)</div>
+<div class="frow"><label>Jeton agent yapson-transfer</label>
+<input type="password" name="yapsonToken" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" value="${u.cfg.yapsonToken?'●'.repeat(20):''}" placeholder="yat_...">
+${u.cfg.yapsonToken?'<span class="tag-ok">✓ Actif</span>':'<span class="tag-err">✗ non configuré</span>'}
+</div>
+<div class="frow"><label>Plateforme par opérateur</label>
+<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:12px">
+<span>Wave : <select name="platWave" style="padding:5px 8px;border-radius:6px">
+<option value="connectpro"${(u.cfg.platforms&&u.cfg.platforms.WAVE==='yapson')?'':' selected'}>ConnectPro</option>
+<option value="yapson"${(u.cfg.platforms&&u.cfg.platforms.WAVE==='yapson')?' selected':''}>yapson-transfer</option>
+</select></span>
+<span>Orange : <select name="platOrange" style="padding:5px 8px;border-radius:6px">
+<option value="yapless"${(u.cfg.platforms&&u.cfg.platforms.ORANGE==='yapson')?'':' selected'}>YAPLESS</option>
+<option value="yapson"${(u.cfg.platforms&&u.cfg.platforms.ORANGE==='yapson')?' selected':''}>yapson-transfer</option>
+</select></span>
+</div>
+<div style="font-size:10px;color:var(--m);margin-top:6px">MTN / Moov : YAPLESS (ou ConnectPro si pas de jeton YAPLESS). yapson-transfer nécessite le jeton ci-dessus.</div>
 </div></div>
 <div>
 <div class="seclbl" style="color:var(--g)">my-managment.com</div>
@@ -831,9 +933,14 @@ app.get('/dashboard',(req,res)=>{const s=getSession(req);if(!s)return res.redire
 app.post('/user/save-accounts',(req,res)=>{
 const s=getSession(req);if(!s||s.isAdmin)return res.redirect('/login');
 const u=users[s.userId];if(!u)return res.redirect('/login');
-const{connectproToken,mgmtCookies,yaplessToken}=req.body;
+const{connectproToken,mgmtCookies,yaplessToken,yapsonToken,platWave,platOrange}=req.body;
 if(connectproToken&&!connectproToken.startsWith('●')){u.cfg.connectproToken=connectproToken.trim();ulog(u,'ok','🔑 Token ConnectPro mis à jour');}
 if(yaplessToken&&!yaplessToken.startsWith('●')){u.cfg.yaplessToken=yaplessToken.trim();ulog(u,'ok','📡 Jeton YAPLESS mis à jour (Orange/MTN/Moov via USSD)');}
+if(yapsonToken&&!yapsonToken.startsWith('●')){u.cfg.yapsonToken=yapsonToken.trim();ulog(u,'ok','🟢 Jeton yapson-transfer mis à jour');}
+if(!u.cfg.platforms)u.cfg.platforms={WAVE:'connectpro',ORANGE:'yapless'};
+if(platWave==='connectpro'||platWave==='yapson'){u.cfg.platforms.WAVE=platWave;}
+if(platOrange==='yapless'||platOrange==='yapson'){u.cfg.platforms.ORANGE=platOrange;}
+ulog(u,'ok',`⚙ Plateformes — Wave: ${u.cfg.platforms.WAVE} · Orange: ${u.cfg.platforms.ORANGE}`);
 if(mgmtCookies){const t=mgmtCookies.trim();const ok=t.startsWith('[')||/^[a-zA-Z_][a-zA-Z0-9_]*=/.test(t);const bad=t.includes('configuré')||t.includes('(coller')||t.startsWith('(');if(ok&&!bad){u.cfg.mgmtCookies=t;ulog(u,'ok',`🍪 Cookies mis à jour — ${parseCookies(t).split(';').length} cookie(s)`);}else if(bad){ulog(u,'warn','⚠ Cookies ignorés (placeholder)');}}
 ulog(u,'ok','Comptes sauvegardés');
 saveUser(u);
