@@ -495,7 +495,7 @@ return { ok:false, status:'TIMEOUT', err:'Timeout yapson' };
 // Traite un retrait via yapson-transfer (Wave/Orange app), puis confirme my-managment.
 async function handleYapsonItem(u, item, operator, filesRequired) {
 ulog(u,'info',` 🟢 yapson-transfer → ${item.phone} — ${item.montant.toLocaleString()} FCFA [${operator}]`);
-const recipientName = operator === 'WAVE' ? (item.recipientName || 'Client') : null;
+const recipientName = (operator === 'WAVE' || operator === 'WAVE_PERSO') ? (item.recipientName || null) : null;
 const created = await createYapsonPayout(u, { operator, amount:item.montant, phone:item.phone, recipientName, ref:String(item.confirmData?.id||'') });
 if (!created.ok) { u.stats.missing++; ulog(u,'err',` ✘ yapson création échouée: ${item.phone} — ${created.err}`); return; }
 ulog(u,'ok',` ✔ Ordre yapson créé: ${item.phone} (ref ${created.reference})`);
