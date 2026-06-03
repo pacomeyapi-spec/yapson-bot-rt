@@ -450,7 +450,7 @@ else { u.stats.missing++; ulog(u,'warn',` ⚠ Manuel: ${item.phone} — ${cr.err
 function choosePlatform(u, operator) {
 const sel = (u.cfg.platforms && u.cfg.platforms[operator]) || '';
 if (operator === 'WAVE') {
-if (sel === 'yapson' && u.cfg.yapsonToken) return 'yapson';
+if ((sel === 'yapson' || sel === 'yapson_perso') && u.cfg.yapsonToken) return 'yapson';
 return 'connectpro';
 }
 if (operator === 'ORANGE') {
@@ -539,8 +539,9 @@ for (const item of items) {
 ulog(u,'info',` → ${item.phone} — ${item.montant.toLocaleString()} FCFA [${network}]`);
 const operator = network === 'Wave' ? 'WAVE' : NET_TO_OPERATOR[network];
 const platform = choosePlatform(u, operator);
-if (operator) ulog(u,'info',` ⚙ ${operator} → plateforme: ${platform}`);
-if (platform === 'yapson' && operator) { await handleYapsonItem(u, item, operator, filesRequired); await sleep(700); continue; }
+const yapsonOperator = (operator === 'WAVE' && u.cfg.platforms && u.cfg.platforms.WAVE === 'yapson_perso') ? 'WAVE_PERSO' : operator;
+if (operator) ulog(u,'info',` ⚙ ${operator} → plateforme: ${platform}${platform==='yapson'?' ('+yapsonOperator+')':''}`);
+if (platform === 'yapson' && operator) { await handleYapsonItem(u, item, yapsonOperator, filesRequired); await sleep(700); continue; }
 if (platform === 'yapless' && operator && operator !== 'WAVE') { await handleYaplessItem(u, item, operator, filesRequired); await sleep(700); continue; }
 const payResult=await payout(u,item,network);
 if (!payResult.ok) { u.stats.missing++; ulog(u,'err',` ✘ Décaissement échoué: ${item.phone} — ${payResult.err}`); if(payResult.tokenExpired){ulog(u,'err',' 🔑 Token ConnectPro expiré — arrêt');u.isRunning=false;return;} await sleep(800); continue; }
@@ -856,8 +857,9 @@ ${u.cfg.yapsonToken?'<span class="tag-ok">✓ Actif</span>':'<span class="tag-er
 <div class="frow"><label>Plateforme par opérateur</label>
 <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:12px">
 <span>Wave : <select name="platWave" style="padding:5px 8px;border-radius:6px">
-<option value="connectpro"${(u.cfg.platforms&&u.cfg.platforms.WAVE==='yapson')?'':' selected'}>ConnectPro</option>
-<option value="yapson"${(u.cfg.platforms&&u.cfg.platforms.WAVE==='yapson')?' selected':''}>yapson-transfer</option>
+<option value="connectpro"${(u.cfg.platforms&&(u.cfg.platforms.WAVE==='yapson'||u.cfg.platforms.WAVE==='yapson_perso'))?'':' selected'}>ConnectPro</option>
+<option value="yapson"${(u.cfg.platforms&&u.cfg.platforms.WAVE==='yapson')?' selected':''}>yapson — Wave business</option>
+<option value="yapson_perso"${(u.cfg.platforms&&u.cfg.platforms.WAVE==='yapson_perso')?' selected':''}>yapson — Wave personnel</option>
 </select></span>
 <span>Orange : <select name="platOrange" style="padding:5px 8px;border-radius:6px">
 <option value="yapless"${(u.cfg.platforms&&u.cfg.platforms.ORANGE==='yapson')?'':' selected'}>YAPLESS</option>
@@ -938,7 +940,7 @@ if(connectproToken&&!connectproToken.startsWith('●')){u.cfg.connectproToken=co
 if(yaplessToken&&!yaplessToken.startsWith('●')){u.cfg.yaplessToken=yaplessToken.trim();ulog(u,'ok','📡 Jeton YAPLESS mis à jour (Orange/MTN/Moov via USSD)');}
 if(yapsonToken&&!yapsonToken.startsWith('●')){u.cfg.yapsonToken=yapsonToken.trim();ulog(u,'ok','🟢 Jeton yapson-transfer mis à jour');}
 if(!u.cfg.platforms)u.cfg.platforms={WAVE:'connectpro',ORANGE:'yapless'};
-if(platWave==='connectpro'||platWave==='yapson'){u.cfg.platforms.WAVE=platWave;}
+if(platWave==='connectpro'||platWave==='yapson'||platWave==='yapson_perso'){u.cfg.platforms.WAVE=platWave;}
 if(platOrange==='yapless'||platOrange==='yapson'){u.cfg.platforms.ORANGE=platOrange;}
 ulog(u,'ok',`⚙ Plateformes — Wave: ${u.cfg.platforms.WAVE} · Orange: ${u.cfg.platforms.ORANGE}`);
 if(mgmtCookies){const t=mgmtCookies.trim();const ok=t.startsWith('[')||/^[a-zA-Z_][a-zA-Z0-9_]*=/.test(t);const bad=t.includes('configuré')||t.includes('(coller')||t.startsWith('(');if(ok&&!bad){u.cfg.mgmtCookies=t;ulog(u,'ok',`🍪 Cookies mis à jour — ${parseCookies(t).split(';').length} cookie(s)`);}else if(bad){ulog(u,'warn','⚠ Cookies ignorés (placeholder)');}}
