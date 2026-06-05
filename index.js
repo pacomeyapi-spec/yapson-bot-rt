@@ -399,7 +399,7 @@ if (res.ok && j.ok) return { ok:true, id:j.id, reference:j.reference, status:j.s
 return { ok:false, err:`[${res.status}] ${j.error||''}` };
 } catch(e) { return { ok:false, err:e.message }; }
 }
-async function pollYapless(u, id, maxWait=130000) {
+async function pollYapless(u, id, maxWait=330000) {
 const start = Date.now();
 while (Date.now()-start < maxWait) {
 await sleep(5000);
@@ -413,7 +413,7 @@ if (st==='FAILED') return { ok:false, status:st, err:j.error||'échec' };
 ulog(u,'info',` ⏳ YAPLESS ${st}... (${Math.round((Date.now()-start)/1000)}s)`);
 } catch(e) { ulog(u,'info',` ⏳ YAPLESS attente... (${Math.round((Date.now()-start)/1000)}s)`); }
 }
-return { ok:false, status:'TIMEOUT', err:'Timeout 2min YAPLESS' };
+return { ok:false, status:'TIMEOUT', err:'Timeout 5min YAPLESS' };
 }
 // Traite un retrait via YAPLESS : crée le DÉPÔT, attend le SMS, confirme my-managment.
 async function handleYaplessItem(u, item, operator, filesRequired) {
@@ -421,7 +421,7 @@ ulog(u,'info',` 📡 YAPLESS → ${item.phone} — ${item.montant.toLocaleString
 const created = await createYaplessPayout(u, { operator, amount:item.montant, phone:item.phone, ref:String(item.confirmData?.id||'') });
 if (!created.ok) { u.stats.missing++; ulog(u,'err',` ✘ YAPLESS création échouée: ${item.phone} — ${created.err}`); return; }
 ulog(u,'ok',` ✔ Ordre YAPLESS créé: ${item.phone} (ref ${created.reference})`);
-const w = await pollYapless(u, created.id, 130000);
+const w = await pollYapless(u, created.id, 330000);
 if (!w.ok) {
 u.stats.missing++;
 if (!u.blacklist) u.blacklist = new Set();
